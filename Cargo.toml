@@ -1,7 +1,7 @@
 [package]
 name = "zlib-stream-rs"
 description = "An utility to decompress zlib-stream encoded WebSocket messages"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2018"
 authors = ["Alexander Becker <bytealex@zerotwo.bot>"]
 keywords = ["encoding", "gzip", "deflate", "zlib"]
