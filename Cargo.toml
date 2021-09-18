@@ -7,6 +7,7 @@ authors = ["Alexander Becker <bytealex@zerotwo.bot>"]
 keywords = ["encoding", "gzip", "deflate", "zlib"]
 categories = ["compression", "accessibility"]
 license = "Apache-2.0"
+repository = "https://github.com/ZeroTwo-Bot/zlib-stream-rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
