@@ -1,3 +1,9 @@
+#[cfg(feature = "stream")]
+pub mod stream;
+
+#[cfg(test)]
+mod test;
+
 use flate2::DecompressError;
 use flate2::{Decompress, FlushDecompress, Status};
 use thiserror::Error;
@@ -68,36 +74,39 @@ impl ZlibStreamDecompressor {
     ///
     /// In case everything went `Ok`, it will return a Vec<u8> representing the
     /// decompressed data
-    pub fn decompress(
+    pub fn decompress<T: AsRef<[u8]>>(
         &mut self,
-        mut frame: Vec<u8>,
+        frame: T,
     ) -> Result<Vec<u8>, ZlibDecompressionError> {
-        if self.read_buf.is_empty() {
-            self.read_buf = frame;
-        } else {
-            self.read_buf.append(&mut frame);
-        }
-        if !self.read_buf.ends_with(&ZLIB_END_BUF) {
+        let mut read_buf = frame.as_ref();
+        if !read_buf.ends_with(&ZLIB_END_BUF) {
+            self.read_buf = read_buf.to_vec();
             return Err(ZlibDecompressionError::NeedMoreData);
         }
-        let size_in = self.read_buf.len();
+
+        if !self.read_buf.is_empty() {
+            self.read_buf.extend_from_slice(read_buf);
+            read_buf = self.read_buf.as_slice();
+        }
+
+        let size_in = read_buf.len();
         let mut read_offset = 0usize;
-        let mut out = self.generate_output_buffer(self.read_buf.len());
+        let mut out = self.generate_output_buffer(read_buf.len());
         let mut output_buf = vec![];
         loop {
             let bytes_before = self.inflate.total_in();
             let status = self.inflate.decompress_vec(
-                &self.read_buf[read_offset..],
+                &read_buf[read_offset..],
                 &mut out,
                 FlushDecompress::Sync,
             )?;
             match status {
                 Status::Ok => {
                     output_buf.append(&mut out);
-                    out = self.generate_output_buffer(self.read_buf.len());
+                    out = self.generate_output_buffer(read_buf.len());
                     let bytes_after = self.inflate.total_in();
                     read_offset = read_offset + (bytes_after - bytes_before) as usize;
-                    if read_offset >= self.read_buf.len() {
+                    if read_offset >= read_buf.len() {
                         self.read_buf.clear();
                         log::trace!(
                             "Decompression bytes - Input {}b -> Output {}b | Factor: x{:.2}",
@@ -131,7 +140,16 @@ impl ZlibStreamDecompressor {
         return if let Some(buffer_factor) = self.output_buffer_factor {
             Vec::with_capacity(frame_size * buffer_factor)
         } else {
-            Vec::with_capacity(self.output_buffer_size.unwrap_or(DEFAULT_OUTPUT_BUFFER_SIZE))
+            Vec::with_capacity(
+                self.output_buffer_size
+                    .unwrap_or(DEFAULT_OUTPUT_BUFFER_SIZE),
+            )
         };
+    }
+}
+
+impl Default for ZlibStreamDecompressor {
+    fn default() -> Self {
+        ZlibStreamDecompressor::new()
     }
 }
