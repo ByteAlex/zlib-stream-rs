@@ -1,5 +1,5 @@
-use crate::{ZlibStreamDecompressor, ZlibDecompressionError};
-use std::sync::mpsc::{Sender, channel};
+use crate::{ZlibDecompressionError, ZlibStreamDecompressor};
+use std::sync::mpsc::{channel, Sender};
 
 #[derive(Clone)]
 pub struct ZlibStreamDecompressorThread {
@@ -8,12 +8,13 @@ pub struct ZlibStreamDecompressorThread {
 
 enum ThreadMessage {
     Finish,
-    Decompress(Vec<u8>, futures::channel::oneshot::Sender<Result<Vec<u8>, ZlibDecompressionError>>)
+    Decompress(
+        Vec<u8>,
+        futures::channel::oneshot::Sender<Result<Vec<u8>, ZlibDecompressionError>>,
+    ),
 }
 
 impl ZlibStreamDecompressorThread {
-
-
     pub fn spawn(decompressor: ZlibStreamDecompressor) -> ZlibStreamDecompressorThread {
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -35,16 +36,17 @@ impl ZlibStreamDecompressorThread {
                 }
             }
         });
-        ZlibStreamDecompressorThread {
-            sender: tx,
-        }
+        ZlibStreamDecompressorThread { sender: tx }
     }
 
     pub fn abort(&self) {
         self.sender.send(ThreadMessage::Finish).ok();
     }
 
-    pub fn decompress(&self, data: Vec<u8>) -> futures::channel::oneshot::Receiver<Result<Vec<u8>, ZlibDecompressionError>> {
+    pub fn decompress(
+        &self,
+        data: Vec<u8>,
+    ) -> futures::channel::oneshot::Receiver<Result<Vec<u8>, ZlibDecompressionError>> {
         let (tx, rx) = futures::channel::oneshot::channel();
         self.sender.send(ThreadMessage::Decompress(data, tx)).ok();
         rx
