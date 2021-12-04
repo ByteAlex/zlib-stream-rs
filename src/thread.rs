@@ -1,5 +1,5 @@
 use crate::{ZlibDecompressionError, ZlibStreamDecompressor};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 
 #[derive(Clone)]
 pub struct ZlibStreamDecompressorThread {
@@ -17,26 +17,30 @@ enum ThreadMessage {
 impl ZlibStreamDecompressorThread {
     pub fn spawn(decompressor: ZlibStreamDecompressor) -> ZlibStreamDecompressorThread {
         let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            let mut decompressor = decompressor;
-            loop {
-                match rx.recv() {
-                    Ok(message) => {
-                        match message {
-                            ThreadMessage::Finish => break,
-                            ThreadMessage::Decompress(data, channel) => {
-                                let result = decompressor.decompress(data);
-                                channel.send(result).ok(); // this is fine
-                            }
+        #[cfg(not(feature = "tokio-runtime"))]
+        std::thread::spawn(move || ZlibStreamDecompressorThread::work(decompressor, rx));
+        #[cfg(feature = "tokio-runtime")]
+        tokio::task::spawn_blocking(move || ZlibStreamDecompressorThread::work(decompressor, rx));
+        ZlibStreamDecompressorThread { sender: tx }
+    }
+
+    fn work(mut decompressor: ZlibStreamDecompressor, rx: Receiver<ThreadMessage>) {
+        loop {
+            match rx.recv() {
+                Ok(message) => {
+                    match message {
+                        ThreadMessage::Finish => break,
+                        ThreadMessage::Decompress(data, channel) => {
+                            let result = decompressor.decompress(data);
+                            channel.send(result).ok(); // this is fine
                         }
                     }
-                    Err(err) => {
-                        log::error!("Decompressor Thread errored on channel recv: {}", err)
-                    }
+                }
+                Err(err) => {
+                    log::error!("Decompressor Thread errored on channel recv: {}", err)
                 }
             }
-        });
-        ZlibStreamDecompressorThread { sender: tx }
+        }
     }
 
     pub fn abort(&self) {

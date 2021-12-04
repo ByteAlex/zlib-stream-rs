@@ -19,6 +19,7 @@ flate2 = { version = "1.0", features = ["cloudflare_zlib"], default-features = f
 
 futures-util = { version = "0.3.17", optional = true }
 futures = { version = "0.3.18", optional = true }
+tokio = { version = "^1", features = ["rt", "rt-multi-thread"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.14.0", features = ["rt", "rt-multi-thread", "macros"] }
@@ -27,3 +28,4 @@ tokio = { version = "1.14.0", features = ["rt", "rt-multi-thread", "macros"] }
 default = ["stream"]
 stream = ["futures-util"]
 thread = ["futures"]
+tokio-runtime = ["tokio", "thread"]
