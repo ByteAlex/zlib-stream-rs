@@ -1,10 +1,10 @@
 use crate::{ZlibDecompressionError, ZlibStreamDecompressor};
 pub use futures::channel::oneshot::Canceled;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{sync_channel, SyncReceiver, SyncSender};
 
 #[derive(Clone)]
 pub struct ZlibStreamDecompressorThread {
-    sender: Sender<ThreadMessage>,
+    sender: SyncSender<ThreadMessage>,
 }
 
 enum ThreadMessage {
@@ -17,7 +17,7 @@ enum ThreadMessage {
 
 impl ZlibStreamDecompressorThread {
     pub fn spawn(decompressor: ZlibStreamDecompressor) -> ZlibStreamDecompressorThread {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(128);
         #[cfg(not(feature = "tokio-runtime"))]
         std::thread::spawn(move || ZlibStreamDecompressorThread::work(decompressor, rx));
         #[cfg(feature = "tokio-runtime")]
@@ -25,7 +25,7 @@ impl ZlibStreamDecompressorThread {
         ZlibStreamDecompressorThread { sender: tx }
     }
 
-    fn work(mut decompressor: ZlibStreamDecompressor, rx: Receiver<ThreadMessage>) {
+    fn work(mut decompressor: ZlibStreamDecompressor, rx: SyncReceiver<ThreadMessage>) {
         loop {
             match rx.recv() {
                 Ok(message) => {
