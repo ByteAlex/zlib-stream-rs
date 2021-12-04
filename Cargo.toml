@@ -18,12 +18,12 @@ thiserror = "1.0.28"
 flate2 = { version = "1.0", features = ["cloudflare_zlib"], default-features = false }
 
 futures-util = { version = "0.3.17", optional = true }
-tokio = { version = "^1", features = ["rt-multi-thread"], optional = true }
+futures = { version = "0.3.18", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.14.0", features = ["rt", "macros"] }
+tokio = { version = "1.14.0", features = ["rt", "rt-multi-thread", "macros"] }
 
 [features]
 default = ["stream"]
-tokio-runtime = ["stream", "tokio"]
 stream = ["futures-util"]
+thread = ["futures"]

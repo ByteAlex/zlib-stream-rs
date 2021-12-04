@@ -1,5 +1,7 @@
 #[cfg(feature = "stream")]
 pub mod stream;
+#[cfg(feature = "thread")]
+pub mod thread;
 
 #[cfg(test)]
 mod test;
