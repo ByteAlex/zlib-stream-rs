@@ -1,7 +1,6 @@
 use crate::stream::ZlibStream;
 use crate::{ZlibDecompressionError, ZlibStreamDecompressor};
-use futures_util::{Stream, StreamExt};
-use std::pin::Pin;
+use futures_util::StreamExt;
 
 fn payload() -> Vec<u8> {
     vec![
@@ -72,7 +71,7 @@ async fn test_stream() {
     let stream = futures_util::stream::iter(stream);
     let mut stream = ZlibStream::new(stream);
 
-    let result = futures_util::future::poll_fn(move |cx| Pin::new(&mut stream).poll_next(cx)).await;
+    let result = stream.next().await;
     assert_eq!(
         inflated(),
         String::from_utf8(

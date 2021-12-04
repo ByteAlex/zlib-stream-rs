@@ -53,29 +53,26 @@ impl<V: AsRef<[u8]> + Sized, T: Stream<Item=V> + Unpin> Stream for ZlibStream<V,
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         #[cfg(feature = "thread")]
         if let Some(poll) = &mut self.thread_poll {
-            match Pin::new(poll).poll(cx) {
-                Poll::Ready(outer) => {
-                    match outer {
-                        Ok(result) => {
-                            match result {
-                                Ok(data) => return Poll::Ready(Some(Ok(data))),
-                                Err(ZlibDecompressionError::DecompressError(err)) => return Poll::Ready(Some(Err(err))),
-                                _ => {}
-                            }
-                        }
-                        Err(_cancelled) => return Poll::Ready(None)
+            if let Some(poll) = poll_decompress_channel(poll, cx) {
+                match poll {
+                    Poll::Ready(_) => {
+                        self.thread_poll = None;
+                    }
+                    Poll::Pending => {
+                        cx.waker().wake_by_ref();
                     }
                 }
-                Poll::Pending => {
-                    cx.waker().wake_by_ref();
-                    return Poll::Pending
-                },
+                return poll;
             }
         }
         match Pin::new(&mut self.stream.next()).poll(cx) {
             Poll::Ready(vec) => {
                 if let Some(vec) = vec {
-                    let result = self.decompressor.decompress(vec.as_ref().to_vec());
+                    #[cfg(not(feature = "thread"))]
+                        let result = self.decompressor.decompress(vec);
+                    #[cfg(feature = "thread")]
+                    let mut result = self.decompressor.decompress(vec.as_ref().to_vec());
+
 
                     #[cfg(not(feature = "thread"))]
                     match result {
@@ -92,14 +89,43 @@ impl<V: AsRef<[u8]> + Sized, T: Stream<Item=V> + Unpin> Stream for ZlibStream<V,
 
                     #[cfg(feature = "thread")]
                         {
-                            self.thread_poll = Some(result);
-                            Poll::Pending
+                            if let Some(poll) = poll_decompress_channel(&mut result, cx) {
+                                if let Poll::Pending = poll {
+                                    self.thread_poll = Some(result);
+                                    cx.waker().wake_by_ref();
+                                }
+                                poll
+                            } else {
+                                cx.waker().wake_by_ref();
+                                Poll::Pending
+                            }
                         }
                 } else {
                     Poll::Ready(None)
                 }
             }
             Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+#[cfg(feature = "thread")]
+fn poll_decompress_channel(channel: &mut futures::channel::oneshot::Receiver<Result<Vec<u8>, ZlibDecompressionError>>, cx: &mut Context<'_>) -> Option<Poll<Option<Result<Vec<u8>, DecompressError>>>> {
+    match Pin::new(channel).poll(cx) {
+        Poll::Ready(outer) => {
+            match outer {
+                Ok(result) => {
+                    match result {
+                        Ok(data) => Some(Poll::Ready(Some(Ok(data)))),
+                        Err(ZlibDecompressionError::DecompressError(err)) => Some(Poll::Ready(Some(Err(err)))),
+                        _ => None,
+                    }
+                }
+                Err(_cancelled) => return Some(Poll::Ready(None)),
+            }
+        }
+        Poll::Pending => {
+            return Some(Poll::Pending);
         }
     }
 }

@@ -25,7 +25,7 @@ impl ZlibStreamDecompressorThread {
                             ThreadMessage::Finish => break,
                             ThreadMessage::Decompress(data, channel) => {
                                 let result = decompressor.decompress(data);
-                                channel.send(result).ok();
+                                channel.send(result).ok(); // this is fine
                             }
                         }
                     }
