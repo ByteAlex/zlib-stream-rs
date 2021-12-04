@@ -1,6 +1,6 @@
 use crate::{ZlibDecompressionError, ZlibStreamDecompressor};
 pub use futures::channel::oneshot::Canceled;
-use std::sync::mpsc::{sync_channel, SyncReceiver, SyncSender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 
 #[derive(Clone)]
 pub struct ZlibStreamDecompressorThread {
@@ -25,7 +25,7 @@ impl ZlibStreamDecompressorThread {
         ZlibStreamDecompressorThread { sender: tx }
     }
 
-    fn work(mut decompressor: ZlibStreamDecompressor, rx: SyncReceiver<ThreadMessage>) {
+    fn work(mut decompressor: ZlibStreamDecompressor, rx: Receiver<ThreadMessage>) {
         loop {
             match rx.recv() {
                 Ok(message) => {
