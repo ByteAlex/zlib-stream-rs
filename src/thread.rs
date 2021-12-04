@@ -1,4 +1,5 @@
 use crate::{ZlibDecompressionError, ZlibStreamDecompressor};
+pub use futures::channel::oneshot::Canceled;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 #[derive(Clone)]
