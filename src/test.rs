@@ -1,7 +1,9 @@
+#[cfg(feature = "chunk")]
+use crate::chunk::ChunkedByteStream;
+#[cfg(feature = "stream")]
 use crate::stream::ZlibStream;
 use crate::{ZlibDecompressionError, ZlibStreamDecompressor};
-use futures_util::{Stream, StreamExt};
-use std::pin::Pin;
+use futures_util::StreamExt;
 
 fn payload() -> Vec<u8> {
     vec![
@@ -72,7 +74,7 @@ async fn test_stream() {
     let stream = futures_util::stream::iter(stream);
     let mut stream = ZlibStream::new(stream);
 
-    let result = futures_util::future::poll_fn(move |cx| Pin::new(&mut stream).poll_next(cx)).await;
+    let result = stream.next().await;
     assert_eq!(
         inflated(),
         String::from_utf8(
@@ -94,6 +96,45 @@ async fn test_stream_split() {
 
     let result = stream.next().await;
 
+    assert_eq!(
+        inflated(),
+        String::from_utf8(
+            result
+                .expect("Poll returned end of stream")
+                .expect("Decompression failed")
+        )
+        .unwrap()
+    )
+}
+
+#[cfg(feature = "chunk")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_chunk_stream() {
+    let chunk_size = 8usize;
+    let data = vec![payload()];
+
+    let stream = futures_util::stream::iter(data);
+    let mut stream = ChunkedByteStream::new(stream, chunk_size);
+    let mut concat = vec![];
+    while let Some(data) = stream.next().await {
+        concat.extend_from_slice(data.as_slice());
+        assert!(data.len() <= chunk_size, "Data size exceeded threshold!")
+    }
+
+    assert_eq!(concat, payload(), "Payloads aren't equal")
+}
+
+#[cfg(feature = "chunk")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_chunk_stream_zlib() {
+    let chunk_size = 55usize;
+    let data = vec![payload()];
+
+    let stream = futures_util::stream::iter(data);
+    let stream = ChunkedByteStream::new(stream, chunk_size);
+    let mut stream = ZlibStream::new(stream);
+
+    let result = stream.next().await;
     assert_eq!(
         inflated(),
         String::from_utf8(
