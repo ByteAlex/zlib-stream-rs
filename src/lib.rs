@@ -1,3 +1,5 @@
+#[cfg(feature = "chunk")]
+pub mod chunk;
 #[cfg(feature = "stream")]
 pub mod stream;
 #[cfg(feature = "thread")]
