@@ -14,16 +14,27 @@ pub enum ZlibDecompressionError {
     DecompressError(#[from] DecompressError),
     #[error("Stream is not completed; Waiting for more data...")]
     NeedMoreData,
+    #[error("Buffered zlib stream exceeded {limit} bytes (attempted {buffered} bytes)")]
+    BufferLimitExceeded { limit: usize, buffered: usize },
 }
 
 const ZLIB_END_BUF: [u8; 4] = [0, 0, 255, 255];
 const DEFAULT_OUTPUT_BUFFER_SIZE: usize = 1024 * 128; // 128 kb
+const DEFAULT_READ_BUFFER_SIZE: usize = 1024 * 8; // 8 kb
+const DEFAULT_MAX_BUFFERED_BYTES: usize = 1024 * 1024 * 8; // 8 mb
+
+#[derive(Clone, Copy)]
+enum OutputBufferMode {
+    Factor(usize),
+    Fixed(usize),
+}
 
 pub struct ZlibStreamDecompressor {
     inflate: Decompress,
     read_buf: Vec<u8>,
-    output_buffer_factor: Option<usize>,
-    output_buffer_size: Option<usize>,
+    output_buf: Vec<u8>,
+    output_buffer_mode: OutputBufferMode,
+    max_buffered_bytes: usize,
 }
 
 impl ZlibStreamDecompressor {
@@ -31,7 +42,7 @@ impl ZlibStreamDecompressor {
     ///
     /// -> Uses a default output buffer of 128 kb
     pub fn new() -> Self {
-        return ZlibStreamDecompressor::with_buffer_size(DEFAULT_OUTPUT_BUFFER_SIZE);
+        ZlibStreamDecompressor::with_buffer_size(DEFAULT_OUTPUT_BUFFER_SIZE)
     }
 
     /// Creates a new ZlibStreamDecompressor with the given output buffer factor
@@ -42,11 +53,21 @@ impl ZlibStreamDecompressor {
     /// This is a possible attack vector if your input is not verified, as it can easily
     /// consume a lot of memory if there's no ZLIB_END signature for a long time
     pub fn with_buffer_factor(output_buffer_factor: usize) -> Self {
+        Self::with_buffer_factor_and_limit(output_buffer_factor, DEFAULT_MAX_BUFFERED_BYTES)
+    }
+
+    /// Creates a new ZlibStreamDecompressor with an output buffer factor and an explicit
+    /// maximum number of bytes allowed while buffering partial frames.
+    pub fn with_buffer_factor_and_limit(
+        output_buffer_factor: usize,
+        max_buffered_bytes: usize,
+    ) -> Self {
         Self {
             inflate: Decompress::new(true),
-            read_buf: Vec::new(),
-            output_buffer_factor: Some(output_buffer_factor),
-            output_buffer_size: None,
+            read_buf: Vec::with_capacity(DEFAULT_READ_BUFFER_SIZE),
+            output_buf: Vec::new(),
+            output_buffer_mode: OutputBufferMode::Factor(output_buffer_factor),
+            max_buffered_bytes: max_buffered_bytes.max(1),
         }
     }
 
@@ -54,12 +75,56 @@ impl ZlibStreamDecompressor {
     ///
     /// The buffer size will be fixed at the given value
     pub fn with_buffer_size(output_buffer_size: usize) -> Self {
+        Self::with_buffer_size_and_limit(output_buffer_size, DEFAULT_MAX_BUFFERED_BYTES)
+    }
+
+    /// Creates a new ZlibStreamDecompressor with a fixed output buffer size and an explicit
+    /// maximum number of bytes allowed while buffering partial frames.
+    pub fn with_buffer_size_and_limit(
+        output_buffer_size: usize,
+        max_buffered_bytes: usize,
+    ) -> Self {
         Self {
             inflate: Decompress::new(true),
-            read_buf: Vec::new(),
-            output_buffer_factor: None,
-            output_buffer_size: Some(output_buffer_size),
+            read_buf: Vec::with_capacity(DEFAULT_READ_BUFFER_SIZE),
+            output_buf: Vec::new(),
+            output_buffer_mode: OutputBufferMode::Fixed(output_buffer_size),
+            max_buffered_bytes: max_buffered_bytes.max(1),
         }
+    }
+
+    /// Sets the maximum amount of buffered partial zlib frame bytes before returning
+    /// `ZlibDecompressionError::BufferLimitExceeded`.
+    pub fn set_max_buffered_bytes(&mut self, max_buffered_bytes: usize) {
+        self.max_buffered_bytes = max_buffered_bytes.max(1);
+        if self.read_buf.len() > self.max_buffered_bytes {
+            self.read_buf.clear();
+        }
+    }
+
+    /// Builder variant of `set_max_buffered_bytes`.
+    pub fn with_max_buffered_bytes(mut self, max_buffered_bytes: usize) -> Self {
+        self.set_max_buffered_bytes(max_buffered_bytes);
+        self
+    }
+
+    /// Returns the current maximum partial-frame buffering limit in bytes.
+    pub fn max_buffered_bytes(&self) -> usize {
+        self.max_buffered_bytes
+    }
+
+    /// Clears decompression state and buffered input/output data.
+    pub fn reset(&mut self) {
+        self.inflate = Decompress::new(true);
+        self.read_buf.clear();
+        self.output_buf.clear();
+    }
+
+    /// Reduces retained capacity of internal buffers after traffic spikes.
+    pub fn trim_buffers(&mut self) {
+        self.read_buf.shrink_to(DEFAULT_READ_BUFFER_SIZE);
+        self.output_buf
+            .shrink_to(Self::output_capacity_hint(self.output_buffer_mode));
     }
 
     /// Append the current frame to the read buffer and decompress it if the buffer
@@ -78,73 +143,199 @@ impl ZlibStreamDecompressor {
         &mut self,
         frame: T,
     ) -> Result<Vec<u8>, ZlibDecompressionError> {
-        let mut read_buf = frame.as_ref();
+        let mut output = Vec::new();
+        self.decompress_into(frame, &mut output)?;
+        Ok(output)
+    }
+
+    /// Decompresses the provided frame into an internal reusable output buffer.
+    ///
+    /// The returned slice stays valid until the next mutable call on this decompressor.
+    pub fn decompress_ref<T: AsRef<[u8]>>(
+        &mut self,
+        frame: T,
+    ) -> Result<&[u8], ZlibDecompressionError> {
+        let frame = frame.as_ref();
+        let output_buffer_mode = self.output_buffer_mode;
+        let max_buffered_bytes = self.max_buffered_bytes;
+        let inflate = &mut self.inflate;
+        let read_buf = &mut self.read_buf;
+        let output_buf = &mut self.output_buf;
+
+        Self::decompress_impl(
+            inflate,
+            read_buf,
+            output_buffer_mode,
+            max_buffered_bytes,
+            frame,
+            output_buf,
+        )?;
+        Ok(output_buf.as_slice())
+    }
+
+    /// Appends decompressed data to a caller-provided output buffer.
+    ///
+    /// Reusing one output buffer across calls avoids repeated allocations and is
+    /// the highest throughput path for hot loops.
+    pub fn decompress_into<T: AsRef<[u8]>>(
+        &mut self,
+        frame: T,
+        output_buf: &mut Vec<u8>,
+    ) -> Result<(), ZlibDecompressionError> {
+        let frame = frame.as_ref();
+        let output_buffer_mode = self.output_buffer_mode;
+        let max_buffered_bytes = self.max_buffered_bytes;
+        Self::decompress_impl(
+            &mut self.inflate,
+            &mut self.read_buf,
+            output_buffer_mode,
+            max_buffered_bytes,
+            frame,
+            output_buf,
+        )
+    }
+
+    #[cfg(feature = "bytes-api")]
+    /// Convenience API for users that consume `bytes::Bytes`.
+    pub fn decompress_bytes<T: AsRef<[u8]>>(
+        &mut self,
+        frame: T,
+    ) -> Result<bytes::Bytes, ZlibDecompressionError> {
+        self.decompress(frame).map(bytes::Bytes::from)
+    }
+
+    #[cfg(feature = "bytes-api")]
+    /// Convenience API for users that maintain a `bytes::BytesMut` output buffer.
+    pub fn decompress_into_bytes_mut<T: AsRef<[u8]>>(
+        &mut self,
+        frame: T,
+        output_buf: &mut bytes::BytesMut,
+    ) -> Result<(), ZlibDecompressionError> {
+        let decompressed = self.decompress_ref(frame)?;
+        output_buf.clear();
+        let reserve_bytes = decompressed.len().saturating_sub(output_buf.capacity());
+        if reserve_bytes > 0 {
+            output_buf.reserve(reserve_bytes);
+        }
+        output_buf.extend_from_slice(decompressed);
+        Ok(())
+    }
+
+    #[inline]
+    fn output_capacity_for_mode(output_buffer_mode: OutputBufferMode, frame_size: usize) -> usize {
+        match output_buffer_mode {
+            OutputBufferMode::Factor(buffer_factor) => frame_size.saturating_mul(buffer_factor),
+            OutputBufferMode::Fixed(buffer_size) => buffer_size,
+        }
+    }
+
+    #[inline]
+    fn output_capacity_hint(output_buffer_mode: OutputBufferMode) -> usize {
+        match output_buffer_mode {
+            OutputBufferMode::Factor(_) => DEFAULT_OUTPUT_BUFFER_SIZE,
+            OutputBufferMode::Fixed(buffer_size) => buffer_size,
+        }
+    }
+
+    #[inline]
+    fn buffer_partial_frame(
+        read_buf: &mut Vec<u8>,
+        frame: &[u8],
+        max_buffered_bytes: usize,
+    ) -> Result<(), ZlibDecompressionError> {
+        let buffered = read_buf.len().saturating_add(frame.len());
+        if buffered > max_buffered_bytes {
+            read_buf.clear();
+            return Err(ZlibDecompressionError::BufferLimitExceeded {
+                limit: max_buffered_bytes,
+                buffered,
+            });
+        }
+
+        read_buf.reserve(frame.len());
+        read_buf.extend_from_slice(frame);
+        Ok(())
+    }
+
+    fn decompress_impl(
+        inflate: &mut Decompress,
+        read_buf: &mut Vec<u8>,
+        output_buffer_mode: OutputBufferMode,
+        max_buffered_bytes: usize,
+        frame: &[u8],
+        output_buf: &mut Vec<u8>,
+    ) -> Result<(), ZlibDecompressionError> {
+        if read_buf.is_empty() {
+            if !frame.ends_with(&ZLIB_END_BUF) {
+                Self::buffer_partial_frame(read_buf, frame, max_buffered_bytes)?;
+                return Err(ZlibDecompressionError::NeedMoreData);
+            }
+
+            let output_capacity = Self::output_capacity_for_mode(output_buffer_mode, frame.len());
+            return Ok(Self::decompress_inner(
+                inflate,
+                frame,
+                output_capacity,
+                output_buf,
+            )?);
+        }
+
+        Self::buffer_partial_frame(read_buf, frame, max_buffered_bytes)?;
         if !read_buf.ends_with(&ZLIB_END_BUF) {
-            self.read_buf = read_buf.to_vec();
             return Err(ZlibDecompressionError::NeedMoreData);
         }
 
-        if !self.read_buf.is_empty() {
-            self.read_buf.extend_from_slice(read_buf);
-            read_buf = self.read_buf.as_slice();
-        }
+        let output_capacity = Self::output_capacity_for_mode(output_buffer_mode, read_buf.len());
+        let output =
+            Self::decompress_inner(inflate, read_buf.as_slice(), output_capacity, output_buf);
+        read_buf.clear();
+        Ok(output?)
+    }
 
+    fn decompress_inner(
+        inflate: &mut Decompress,
+        read_buf: &[u8],
+        output_capacity: usize,
+        output_buf: &mut Vec<u8>,
+    ) -> Result<(), DecompressError> {
         let size_in = read_buf.len();
         let mut read_offset = 0usize;
-        let mut out = self.generate_output_buffer(read_buf.len());
-        let mut output_buf = vec![];
+        output_buf.clear();
+
+        let reserve_bytes = output_capacity.saturating_sub(output_buf.capacity());
+        if reserve_bytes > 0 {
+            output_buf.reserve(reserve_bytes);
+        }
+
         loop {
-            let bytes_before = self.inflate.total_in();
-            let status = self.inflate.decompress_vec(
+            let bytes_before = inflate.total_in();
+            let status = inflate.decompress_vec(
                 &read_buf[read_offset..],
-                &mut out,
+                output_buf,
                 FlushDecompress::Sync,
             )?;
-            match status {
-                Status::Ok => {
-                    output_buf.append(&mut out);
-                    out = self.generate_output_buffer(read_buf.len());
-                    let bytes_after = self.inflate.total_in();
-                    read_offset = read_offset + (bytes_after - bytes_before) as usize;
-                    if read_offset >= read_buf.len() {
-                        self.read_buf.clear();
-                        log::trace!(
-                            "Decompression bytes - Input {}b -> Output {}b | Factor: x{:.2}",
-                            size_in,
-                            output_buf.len(),
-                            output_buf.len() as f64 / size_in as f64
-                        );
-                        return Ok(output_buf);
-                    }
-                }
-                Status::BufError | Status::StreamEnd => {
-                    self.read_buf.clear();
-                    output_buf.append(&mut out);
-                    output_buf.shrink_to_fit();
+            let bytes_after = inflate.total_in();
+            let bytes_read = (bytes_after - bytes_before) as usize;
+            read_offset += bytes_read;
 
+            match status {
+                Status::Ok if bytes_read > 0 && read_offset < size_in => continue,
+                Status::Ok | Status::BufError | Status::StreamEnd => {
+                    let factor = if size_in == 0 {
+                        0.0
+                    } else {
+                        output_buf.len() as f64 / size_in as f64
+                    };
                     log::trace!(
                         "Decompression bytes - Input {}b -> Output {}b | Factor: x{:.2}",
                         size_in,
                         output_buf.len(),
-                        output_buf.len() as f64 / size_in as f64
+                        factor
                     );
-
-                    return Ok(output_buf);
+                    return Ok(());
                 }
             }
         }
-    }
-
-    /// Generates a new output buffer based of the given configuration
-    fn generate_output_buffer(&self, frame_size: usize) -> Vec<u8> {
-        return if let Some(buffer_factor) = self.output_buffer_factor {
-            Vec::with_capacity(frame_size * buffer_factor)
-        } else {
-            Vec::with_capacity(
-                self.output_buffer_size
-                    .unwrap_or(DEFAULT_OUTPUT_BUFFER_SIZE),
-            )
-        };
     }
 }
 

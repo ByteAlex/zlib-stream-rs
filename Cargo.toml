@@ -13,17 +13,24 @@ repository = "https://github.com/ZeroTwo-Bot/zlib-stream-rs"
 
 [dependencies]
 log = "0.4.14"
-env_logger = "0.9.0"
 thiserror = "1.0.28"
 flate2 = { version = "1.0", features = ["cloudflare_zlib"], default-features = false }
+bytes = { version = "1", optional = true }
 
-futures-util = { version = "0.3.17", optional = true }
+futures-core = { version = "0.3.17", optional = true }
 tokio = { version = "^1", features = ["rt-multi-thread"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.14.0", features = ["rt", "macros"] }
+tokio = { version = "1.14.0", features = ["rt-multi-thread", "macros"] }
+futures-util = "0.3.17"
+criterion = "0.5"
 
 [features]
 default = ["stream"]
 tokio-runtime = ["stream", "tokio"]
-stream = ["futures-util"]
+stream = ["futures-core"]
+bytes-api = ["bytes"]
+
+[[bench]]
+name = "decompress"
+harness = false
