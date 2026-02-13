@@ -2,6 +2,20 @@ use crate::stream::ZlibStream;
 use crate::{ZlibDecompressionError, ZlibStreamDecompressor};
 use futures_util::{Stream, StreamExt};
 use std::pin::Pin;
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
+use std::io::Write;
+
+fn compress_to_zlib_stream_frame(input: &[u8]) -> Vec<u8> {
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(input).expect("write to encoder");
+    let mut out = encoder.finish().expect("finish encoder");
+    // Discord zlib-stream frames are terminated by 0x00 0x00 0xff 0xff.
+    if !out.ends_with(&[0, 0, 255, 255]) {
+        out.extend_from_slice(&[0, 0, 255, 255]);
+    }
+    out
+}
 
 #[cfg(feature = "bytes-api")]
 use crate::stream::ZlibBytesStream;
@@ -177,6 +191,21 @@ fn test_reset_after_bad_data() {
         inflated(),
         String::from_utf8(result.expect("Decompression failed")).unwrap()
     );
+}
+
+#[test]
+fn test_buferror_grows_output_buffer() {
+    // Highly compressible payload: small input frame, multi-megabyte output.
+    let large = "a".repeat(2 * 1024 * 1024);
+    let expected = format!("{{\"t\":\"GUILD_CREATE\",\"d\":{{\"blob\":\"{}\"}}}}", large);
+
+    let frame = compress_to_zlib_stream_frame(expected.as_bytes());
+
+    // Intentionally small initial capacity heuristic; implementation must grow as needed.
+    let mut decompressor = ZlibStreamDecompressor::with_buffer_factor(1);
+    let out = decompressor.decompress(frame).expect("decompression failed");
+
+    assert_eq!(expected.as_bytes(), out.as_slice());
 }
 
 #[cfg(feature = "stream")]

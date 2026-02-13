@@ -307,8 +307,14 @@ impl ZlibStreamDecompressor {
             output_buf.reserve(reserve_bytes);
         }
 
+        // flate2 can report Status::BufError when the output buffer needs to grow;
+        // treat it as a signal to reserve more and continue instead of returning a truncated frame.
+        let mut no_progress_spins: usize = 0;
+        const MAX_NO_PROGRESS_SPINS: usize = 128;
+
         loop {
             let bytes_before = inflate.total_in();
+            let out_before = output_buf.len();
             let status = inflate.decompress_vec(
                 &read_buf[read_offset..],
                 output_buf,
@@ -316,27 +322,57 @@ impl ZlibStreamDecompressor {
             )?;
             let bytes_after = inflate.total_in();
             let bytes_read = (bytes_after - bytes_before) as usize;
-            read_offset += bytes_read;
+            read_offset = read_offset.saturating_add(bytes_read);
 
-            match status {
-                Status::Ok if bytes_read > 0 && read_offset < size_in => continue,
-                Status::Ok | Status::BufError | Status::StreamEnd => {
-                    let factor = if size_in == 0 {
-                        0.0
-                    } else {
-                        output_buf.len() as f64 / size_in as f64
-                    };
-                    log::trace!(
-                        "Decompression bytes - Input {}b -> Output {}b | Factor: x{:.2}",
-                        size_in,
-                        output_buf.len(),
-                        factor
-                    );
-                    return Ok(());
+            let made_progress = bytes_read > 0 || output_buf.len() > out_before;
+            if made_progress {
+                no_progress_spins = 0;
+            } else {
+                no_progress_spins += 1;
+                if no_progress_spins > MAX_NO_PROGRESS_SPINS {
+                    // Avoid a tight infinite loop on malformed streams.
+                    break;
                 }
             }
+
+            match status {
+                Status::Ok => {
+                    if read_offset < size_in {
+                        continue;
+                    }
+                }
+                Status::BufError => {
+                    if read_offset < size_in {
+                        // Input remains; grow output capacity and keep draining.
+                        output_buf.reserve(output_buf.capacity().max(DEFAULT_OUTPUT_BUFFER_SIZE));
+                        continue;
+                    }
+                }
+                Status::StreamEnd => {
+                    // End-of-stream for this flate stream.
+                }
+            }
+
+            let factor = if size_in == 0 { 0.0 } else { output_buf.len() as f64 / size_in as f64 };
+            log::trace!(
+                "Decompression bytes - Input {}b -> Output {}b | Factor: x{:.2}",
+                size_in,
+                output_buf.len(),
+                factor
+            );
+            return Ok(());
         }
+
+        let factor = if size_in == 0 { 0.0 } else { output_buf.len() as f64 / size_in as f64 };
+        log::trace!(
+            "Decompression bytes - Input {}b -> Output {}b | Factor: x{:.2}",
+            size_in,
+            output_buf.len(),
+            factor
+        );
+        Ok(())
     }
+
 }
 
 impl Default for ZlibStreamDecompressor {
